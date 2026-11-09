@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "flask",
+  "regions": ["fra1"],
+  "functions": {
+    "app.py": { "maxDuration": 60 }
+  },
+  "crons": [
+    { "path": "/api/daily", "schedule": "0 8 * * *" }
+  ]
+}

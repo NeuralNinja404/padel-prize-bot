@@ -1,0 +1,14 @@
+# never upload secrets, local caches or tooling
+.env
+.venv
+data
+out
+logs
+tests
+__pycache__
+*.pyc
+.DS_Store
+.vercel
+.cron_secret
+.env.local
+.env.*

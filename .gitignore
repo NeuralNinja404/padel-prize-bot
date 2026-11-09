@@ -1,0 +1,16 @@
+# Secrets and local settings: the bot token (.env), Vercel's local OIDC token (.env.local), the cron secret
+.env
+.env*
+.cron_secret
+
+# Vercel link to the project (vercel link)
+.vercel/
+
+# Local runs and tooling
+.venv/
+data/
+out/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
