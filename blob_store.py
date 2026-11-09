@@ -16,6 +16,10 @@ import urllib.request
 
 API = "https://vercel.com/api/blob"
 API_VERSION = "13"  # the version @vercel/blob 2.8 sends
+# How long Vercel may serve a cached copy (cached reads that hit don't count toward the plan's allowance).
+# The list changes once a day, so it can be cached for an hour; everything else for a minute.
+CACHE_SECONDS = {"latest": 3600}
+DEFAULT_CACHE_SECONDS = 60
 
 
 class PreconditionFailed(Exception):
@@ -85,7 +89,7 @@ class BlobStore:
             "x-allow-overwrite": "1",
             "x-add-random-suffix": "0",
             "x-content-type": "application/json",
-            "x-cache-control-max-age": "60",
+            "x-cache-control-max-age": str(CACHE_SECONDS.get(key, DEFAULT_CACHE_SECONDS)),
             **self.extra_headers,
         }
         if if_match:

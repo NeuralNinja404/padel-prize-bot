@@ -317,6 +317,18 @@ class BlobStorage(unittest.TestCase):
             store.update("subscribers", lambda d: (d["chats"].setdefault("42", {"since": "y"}), d)[1])
         self.assertEqual(methods, ["GET"])
 
+    def test_the_list_is_cached_for_an_hour_everything_else_for_a_minute(self):
+        seen = []
+
+        def accept(req, timeout=None):
+            seen.append(req.get_header("X-cache-control-max-age"))
+            return FakeResponse()
+        store = blob_store.BlobStore(self.RW, "AbC123storeid")
+        with mock.patch.object(blob_store.urllib.request, "urlopen", accept):
+            store.put("latest", {})
+            store.put("subscribers", {})
+        self.assertEqual(seen, ["3600", "60"])
+
     def test_update_retries_when_someone_else_wrote_first(self):
         etags = iter(['"v1"', '"v2"'])
         writes = []
@@ -336,30 +348,82 @@ class BlobStorage(unittest.TestCase):
         self.assertEqual(result, {"chats": {"42": {}}})
 
 
+class SubscriptionCaps(unittest.TestCase):
+    def test_a_chat_can_change_its_subscription_three_times_a_day(self):
+        bot = make_bot()
+        for command in ("/start", "/stop", "/start", "/stop", "/start"):
+            message(bot, 42, command)
+        self.assertEqual(bot.subscribers(), [])
+        self.assertEqual(bot.tg.sent[-1], ("42", botlib.LIMIT_CHAT))
+
+    def test_stop_always_works(self):
+        bot = make_bot()
+        bot.store.put("subscribers", {"chats": {"42": {}},
+                                      "changes": {"day": "2026-11-10", "new": 99, "by_chat": {"42": 9}}})
+        message(bot, 42, "/stop")
+        self.assertEqual(bot.subscribers(), [])
+
+    def test_new_subscriptions_per_day_are_capped(self):
+        bot = make_bot()
+        with mock.patch.object(botlib, "NEW_SUBSCRIPTIONS_PER_DAY", 2):
+            for chat in (1, 2, 3):
+                message(bot, chat, "/start")
+        self.assertEqual(sorted(bot.subscribers()), ["1", "2"])
+        self.assertEqual(bot.tg.sent[-1], ("3", botlib.LIMIT_ALL))
+
+    def test_caps_reset_the_next_day(self):
+        store = MemoryStore()
+        store.put("subscribers", {"chats": {}, "changes": {"day": "2026-11-09", "new": 99, "by_chat": {"42": 9}}})
+        bot = make_bot(store)
+        message(bot, 42, "/start")
+        self.assertEqual(bot.subscribers(), ["42"])
+
+    def test_repeats_and_refusals_cost_no_storage(self):
+        bot = make_bot()
+        message(bot, 42, "/start")
+        bot.store.reads.clear()
+        bot.store.writes.clear()
+        message(bot, 42, "/start")  # already subscribed
+        message(bot, 7, "/stop")    # not subscribed
+        with mock.patch.object(botlib, "NEW_SUBSCRIPTIONS_PER_DAY", 1):
+            message(bot, 8, "/start")  # refused: today's new-subscription cap is used up
+        self.assertEqual(bot.store.writes, [])
+        self.assertEqual([read for read in bot.store.reads if read[1]], [])  # no fresh (counted) reads
+
+
 class Limits(unittest.TestCase):
     def test_spamming_a_command_gets_one_warning_then_silence(self):
         bot = make_bot()
-        for _ in range(8):
+        for _ in range(14):
             message(bot, 42, "/list")
         texts = [text for chat, text in bot.tg.sent]
-        self.assertEqual(len(texts), 6)  # 5 lists, 1 warning, then nothing
+        self.assertEqual(len(texts), 11)  # 10 lists in the hour, 1 warning, then nothing
         self.assertEqual(texts[-1], botlib.TOO_MANY)
-        self.assertEqual(bot.store.reads.count(("latest", False)), 5)  # ignored commands read nothing
+        self.assertEqual(bot.store.reads.count(("latest", False)), 10)  # ignored commands read nothing
 
     def test_limiter_windows(self):
         clock = [1000.0]
-        limiter = botlib.CommandLimiter(per_minute=2, per_day=3, everyone_per_minute=100, clock=lambda: clock[0])
-        verdicts = [limiter.check(1) for _ in range(4)]
-        self.assertEqual(verdicts, ["ok", "ok", "warn", "drop"])
-        clock[0] += 61  # a minute later: allowed again, until the daily cap
+        limiter = botlib.CommandLimiter(per_hour=2, per_day=3, everyone_per_minute=100, everyone_per_day=100,
+                                        warn_every=3600, clock=lambda: clock[0])
+        self.assertEqual([limiter.check(1) for _ in range(4)], ["ok", "ok", "warn", "drop"])
+        clock[0] += 3601  # an hour later: allowed again, until the daily cap
         self.assertEqual([limiter.check(1), limiter.check(1)], ["ok", "warn"])
+        clock[0] += 60
+        self.assertEqual(limiter.check(1), "drop")  # warned less than an hour ago
         clock[0] += botlib.DAY
         self.assertEqual(limiter.check(1), "ok")
         self.assertEqual(limiter.check(2), "ok")  # other chats have their own counters
 
-    def test_everyone_together_has_a_ceiling(self):
-        limiter = botlib.CommandLimiter(per_minute=5, per_day=50, everyone_per_minute=3, clock=lambda: 5.0)
-        self.assertEqual([limiter.check(c) for c in (1, 2, 3, 4)], ["ok", "ok", "ok", "warn"])
+    def test_everyone_together_has_ceilings(self):
+        per_minute = botlib.CommandLimiter(everyone_per_minute=3, clock=lambda: 5.0)
+        self.assertEqual([per_minute.check(c) for c in (1, 2, 3, 4)], ["ok", "ok", "ok", "warn"])
+        clock = [0.0]
+
+        def tick():
+            clock[0] += 120  # a different minute each time
+            return clock[0]
+        per_day = botlib.CommandLimiter(everyone_per_day=2, clock=tick)
+        self.assertEqual([per_day.check(c) for c in (1, 2, 3)], ["ok", "ok", "warn"])
 
     def test_list_reads_the_cached_copy(self):
         bot = make_bot()
