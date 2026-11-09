@@ -378,6 +378,38 @@ class SubscriptionCaps(unittest.TestCase):
         message(bot, 42, "/start")
         self.assertEqual(bot.subscribers(), ["42"])
 
+    def test_monthly_budget_caps_all_changes(self):
+        bot = make_bot()
+        with mock.patch.object(botlib, "SUBSCRIPTION_CHANGES_PER_MONTH", 2):
+            for chat in (1, 2, 3):
+                message(bot, chat, "/start")
+        self.assertEqual(sorted(bot.subscribers()), ["1", "2"])
+        self.assertEqual(bot.tg.sent[-1], ("3", botlib.LIMIT_MONTH))
+
+    def test_monthly_budget_restarts_next_month(self):
+        store = MemoryStore()
+        store.put("subscribers", {"chats": {}, "changes": {"day": "2026-10-31", "new": 0, "by_chat": {},
+                                                          "month": "2026-10", "month_total": 99999}})
+        bot = make_bot(store)
+        message(bot, 42, "/start")
+        self.assertEqual(bot.subscribers(), ["42"])
+
+    def test_a_launch_day_with_200_people_lets_everyone_in(self):
+        bot = make_bot()
+        for chat in range(200):
+            message(bot, chat, "/start")
+        self.assertEqual(len(bot.subscribers()), 200)
+        self.assertNotIn(botlib.TOO_MANY, [text for _, text in bot.tg.sent])
+        changes = bot.store.get("subscribers")["changes"]
+        self.assertEqual((changes["new"], changes["month_total"]), (200, 200))
+
+    def test_a_busy_store_asks_to_try_again(self):
+        bot = make_bot()
+        with mock.patch.object(bot.store, "update", side_effect=RuntimeError("kept changing")), \
+                self.assertLogs("pado_bot", "WARNING"):
+            message(bot, 42, "/start")
+        self.assertEqual(bot.tg.sent, [("42", botlib.BUSY)])
+
     def test_repeats_and_refusals_cost_no_storage(self):
         bot = make_bot()
         message(bot, 42, "/start")

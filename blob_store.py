@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.parse
@@ -109,10 +110,11 @@ class BlobStore:
                 raise PreconditionFailed(key) from None
             raise BlobStoreError(f"writing {key} failed: HTTP {e.code} {code}".strip()) from None
 
-    def update(self, key, change, default=None, attempts=5):
+    def update(self, key, change, default=None, attempts=8):
         """Read-modify-write that never loses a concurrent update: retries when the document changed meanwhile.
 
-        Skips the write when change() leaves the document as it was (writes are the scarcest allowance)."""
+        Skips the write when change() leaves the document as it was (writes are the scarcest allowance).
+        Retries wait a random, growing pause, so many people subscribing at once don't keep colliding."""
         for attempt in range(attempts):
             value, etag = self._read(key)
             current = copy.deepcopy(default) if value is None else value
@@ -124,5 +126,5 @@ class BlobStore:
                 self.put(key, new, if_match=etag)
                 return new
             except PreconditionFailed:
-                time.sleep(0.2 * (attempt + 1))
+                time.sleep(random.uniform(0.05, 0.3) * (attempt + 1))
         raise BlobStoreError(f"{key} kept changing; gave up after {attempts} attempts")

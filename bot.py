@@ -44,18 +44,21 @@ STOPPED = "🔕 Сповіщення вимкнено. Надішліть /start
 TOO_MANY = "⏳ Забагато запитів. Спробуйте пізніше."
 LIMIT_CHAT = "⏳ Сьогодні ви вже кілька разів змінювали підписку. Спробуйте завтра."
 LIMIT_ALL = "⏳ Сьогодні вже забагато нових підписок. Спробуйте завтра."
+LIMIT_MONTH = "⏳ Цього місяця вже забагато змін підписок. Спробуйте наступного місяця."
+BUSY = "⏳ Зараз багато запитів. Спробуйте ще раз за хвилину."
 
-# Limits that keep the bot inside Vercel's free plan however many people use it.
+# Limits that keep the bot inside Vercel's free plan (sized for a few hundred subscribers).
 # In memory (per running instance; stops bursts, resets when Vercel recycles the instance):
 PER_CHAT_PER_HOUR = 10      # commands one chat may send per hour
 PER_CHAT_PER_DAY = 30       # ...and per day
-EVERYONE_PER_MINUTE = 60    # all chats together
-EVERYONE_PER_DAY = 500
+EVERYONE_PER_MINUTE = 200   # all chats together (a launch-day rush fits)
+EVERYONE_PER_DAY = 3000
 WARN_EVERY = 3600.0         # "too many requests" is said at most once an hour per chat
 # Stored with the subscribers (survives restarts, costs no extra storage operations). Subscribing and
-# unsubscribing are what spend the plan's writes, so these caps keep writes under its monthly allowance:
-CHANGES_PER_CHAT_PER_DAY = 3      # subscribe/unsubscribe per chat per day (/stop always works)
-NEW_SUBSCRIPTIONS_PER_DAY = 30    # for the whole bot
+# unsubscribing are what spend the plan's writes (2,000 a month), so these caps keep writes under it:
+CHANGES_PER_CHAT_PER_DAY = 3            # subscribe/unsubscribe per chat per day (/stop always works)
+NEW_SUBSCRIPTIONS_PER_DAY = 300         # for the whole bot: room for everyone joining on day one
+SUBSCRIPTION_CHANGES_PER_MONTH = 1200   # all subscribes and unsubscribes in a month, the real budget
 SEND_RATE = 20              # alert messages per second, below Telegram's ~30 for bulk sending
 SEND_WORKERS = 8            # alerts sent in parallel
 MINUTE, HOUR, DAY = 60.0, 3600.0, 86400.0
@@ -188,33 +191,42 @@ class Bot:
     def subscribers(self):
         return list(((self.store.get("subscribers", {}) or {}).get("chats") or {}).keys())
 
-    # The same document keeps today's subscription changes, so the caps survive restarts at no extra cost:
-    # "changes": {"day": "2026-11-10", "new": 4, "by_chat": {"<chat id>": 1}}
+    # The same document counts subscription changes, so the caps survive restarts at no extra cost:
+    # "changes": {"day": "2026-11-10", "new": 4, "by_chat": {"<chat id>": 1}, "month": "2026-11", "month_total": 37}
 
     @staticmethod
-    def _changes_today(doc, today):
-        changes = doc.get("changes") or {}
-        return changes if changes.get("day") == today else {"day": today, "new": 0, "by_chat": {}}
+    def _changes(doc, now):
+        """Today's and this month's subscription changes (counters restart on a new day / month)."""
+        changes = dict(doc.get("changes") or {})
+        today, month = now.date().isoformat(), now.strftime("%Y-%m")
+        if changes.get("day") != today:
+            changes.update(day=today, new=0, by_chat={})
+        if changes.get("month") != month:
+            changes.update(month=month, month_total=0)
+        return changes
 
-    def _refusal(self, doc, key, today, subscribing):
-        changes = self._changes_today(doc, today)
-        if subscribing and (changes.get("by_chat") or {}).get(key, 0) >= CHANGES_PER_CHAT_PER_DAY:
+    def _refusal(self, doc, key, now, subscribing):
+        if not subscribing:  # /stop always works
+            return None
+        changes = self._changes(doc, now)
+        if (changes.get("by_chat") or {}).get(key, 0) >= CHANGES_PER_CHAT_PER_DAY:
             return "limit_chat"
-        if subscribing and changes.get("new", 0) >= NEW_SUBSCRIPTIONS_PER_DAY:
+        if changes.get("new", 0) >= NEW_SUBSCRIPTIONS_PER_DAY:
             return "limit_all"
+        if changes.get("month_total", 0) >= SUBSCRIPTION_CHANGES_PER_MONTH:
+            return "limit_month"
         return None
 
     def _set_subscribed(self, chat_id, subscribing):
-        """Subscribe or unsubscribe one chat on its own request: 'ok', 'already', 'limit_chat' or 'limit_all'.
+        """Subscribe or unsubscribe one chat on its own request.
 
-        Checks the cached subscriber list first, so repeats and refusals cost no storage operation;
-        only a real change reads the list fresh and writes it."""
+        Returns 'ok', 'already', 'limit_chat', 'limit_all' or 'limit_month'. Checks the cached subscriber list
+        first, so repeats and refusals cost no storage operation; only a real change reads it fresh and writes."""
         key, now = str(chat_id), self.clock()
-        today = now.date().isoformat()
         cached = self.store.get("subscribers", {}, fresh=False) or {}
         if (key in (cached.get("chats") or {})) == subscribing:
             return "already"
-        refusal = self._refusal(cached, key, today, subscribing)
+        refusal = self._refusal(cached, key, now, subscribing)
         if refusal:
             return refusal
         outcome = []
@@ -225,7 +237,7 @@ class Bot:
             if (key in chats) == subscribing:
                 outcome[:] = ["already"]
                 return doc
-            refusal = self._refusal(doc, key, today, subscribing)
+            refusal = self._refusal(doc, key, now, subscribing)
             if refusal:
                 outcome[:] = [refusal]
                 return doc
@@ -233,9 +245,11 @@ class Bot:
                 chats[key] = {"since": now.isoformat()}
             else:
                 chats.pop(key, None)
-            changes = self._changes_today(doc, today)
+            changes = self._changes(doc, now)
             changes["new"] = changes.get("new", 0) + (1 if subscribing else 0)
-            changes.setdefault("by_chat", {})[key] = changes["by_chat"].get(key, 0) + 1
+            changes["by_chat"] = dict(changes.get("by_chat") or {})
+            changes["by_chat"][key] = changes["by_chat"].get(key, 0) + 1
+            changes["month_total"] = changes.get("month_total", 0) + 1
             doc["changes"] = changes
             return doc
         self.store.update("subscribers", change, default={"chats": {}})
@@ -298,17 +312,21 @@ class Bot:
             if verdict == "warn":
                 self.send(chat, [TOO_MANY])
             return
-        if command == "/start":
-            outcome = self.subscribe(chat)
-            if outcome in ("ok", "already"):
+        if command in ("/start", "/stop"):
+            try:
+                outcome = self.subscribe(chat) if command == "/start" else self.unsubscribe(chat)
+            except Exception:  # e.g. too many people subscribing at the same moment: ask them to retry
+                log.warning("couldn't update the subscriber list", exc_info=True)
+                self.send(chat, [BUSY])
+                return
+            if command == "/stop":
+                self.send(chat, [STOPPED])
+            elif outcome in ("ok", "already"):
                 self.send(chat, [self.text(WELCOME)] + self.list_messages())
             else:
-                self.send(chat, [LIMIT_CHAT if outcome == "limit_chat" else LIMIT_ALL])
+                self.send(chat, [{"limit_chat": LIMIT_CHAT, "limit_all": LIMIT_ALL}.get(outcome, LIMIT_MONTH)])
         elif command == "/list":
             self.send(chat, self.list_messages())
-        elif command == "/stop":
-            self.unsubscribe(chat)
-            self.send(chat, [STOPPED])
         else:
             self.send(chat, [self.text(HELP)])
 
