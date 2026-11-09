@@ -29,7 +29,8 @@ def make_bot():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
-    return botlib.Bot(botlib.Telegram(token), BlobStore.from_env(request.headers), core.load_config())
+    return botlib.Bot(botlib.Telegram(token), BlobStore.from_env(request.headers), core.load_config(),
+                      admin_code=botlib.admin_code(os.environ.get("CRON_SECRET", "")))
 
 
 def has_cron_secret():

@@ -51,6 +51,9 @@ class FakeTelegram:
 
     def call(self, method, **params):
         self.calls.append((method, params))
+        if method == "getChat":
+            return {"id": params["chat_id"], "type": "private", "first_name": "Olena", "last_name": "K",
+                    "username": "olena_k"}
         return {"username": "padel_prize_radar_bot"} if method == "getMe" else True
 
     def send(self, chat_id, text):
@@ -68,18 +71,19 @@ def entry(i, status="yes", new=False):
             "price": {"url": "https://padel-tennis.com.ua/x"} if status == "yes" else None}
 
 
-def make_bot(store=None, telegram=None, limiter=None):
+def make_bot(store=None, telegram=None, limiter=None, admin_code="secretcode"):
     store = store or MemoryStore()
     store.put("latest", store.get("latest") or {"updated": NOW.isoformat(), "checked": 113,
                                                 "tournaments": [entry(1), entry(2, "maybe")]})
     store.reads.clear()
     store.writes.clear()
     return botlib.Bot(telegram or FakeTelegram(), store, core.DEFAULT_CONFIG, clock=lambda: NOW,
-                      limiter=limiter or botlib.CommandLimiter())  # a fresh limiter per test
+                      limiter=limiter or botlib.CommandLimiter(),  # a fresh limiter per test
+                      admin_code=admin_code)
 
 
-def message(bot, chat, text):
-    bot.handle_update({"update_id": 1, "message": {"chat": {"id": chat}, "text": text}})
+def message(bot, chat, text, **chat_fields):
+    bot.handle_update({"update_id": 1, "message": {"chat": {"id": chat, **chat_fields}, "text": text}})
 
 
 class Commands(unittest.TestCase):
@@ -421,6 +425,58 @@ class SubscriptionCaps(unittest.TestCase):
             message(bot, 8, "/start")  # refused: today's new-subscription cap is used up
         self.assertEqual(bot.store.writes, [])
         self.assertEqual([read for read in bot.store.reads if read[1]], [])  # no fresh (counted) reads
+
+
+class OwnerView(unittest.TestCase):
+    def test_the_secret_link_makes_you_admin(self):
+        bot = make_bot()
+        message(bot, 42, "/start admin-secretcode")
+        self.assertEqual(bot.admins(), {"42"})
+        self.assertEqual(bot.tg.sent, [("42", botlib.ADMIN_WELCOME)])
+        self.assertEqual(bot.subscribers(), [])  # becoming admin doesn't subscribe you
+        menu = [params for method, params in bot.tg.calls if method == "setMyCommands"][0]
+        self.assertEqual(menu["scope"], {"type": "chat", "chat_id": 42})
+        self.assertIn("subscribers", [c["command"] for c in menu["commands"]])
+
+    def test_a_wrong_code_is_just_a_normal_start(self):
+        bot = make_bot()
+        message(bot, 42, "/start admin-guess")
+        self.assertEqual((bot.admins(), bot.subscribers()), (set(), ["42"]))
+
+    def test_without_a_secret_nobody_can_become_admin(self):
+        bot = make_bot(admin_code="")
+        message(bot, 42, "/start admin-")
+        self.assertEqual(bot.admins(), set())
+        self.assertEqual(botlib.admin_code(""), "")
+
+    def test_subscribers_is_hidden_from_everyone_else(self):
+        bot = make_bot()
+        message(bot, 7, "/subscribers")
+        self.assertTrue(bot.tg.sent[0][1].startswith("/list"))
+
+    def test_the_report_shows_who_is_subscribed(self):
+        bot = make_bot()
+        message(bot, 1, "/start", type="private", first_name="Andrii", username="andrii_p")
+        message(bot, -100, "/start", type="group", title="Padel friends")
+        # someone who subscribed before names were saved
+        bot.store.update("subscribers", lambda d: (d["chats"].setdefault("5", {"since": "2026-11-09T12:43:00+02:00"}), d)[1])
+        message(bot, 42, "/start admin-secretcode")
+        bot.tg.sent.clear()
+        message(bot, 42, "/subscribers")
+        report = "\n".join(text for _, text in bot.tg.sent)
+        self.assertIn("Підписників: 3", report)
+        self.assertIn("1. Olena K (@olena_k) — з 9 листопада", report)  # looked up from Telegram
+        self.assertIn("Andrii (@andrii_p) — з 10 листопада", report)
+        self.assertIn("Padel friends — з 10 листопада", report)
+        self.assertIn("Сьогодні нових: 2 · змін підписок цього місяця: 2 з 1200", report)
+        self.assertEqual(bot.store.get("subscribers")["chats"]["5"]["username"], "olena_k")  # remembered
+
+    def test_names_are_html_escaped(self):
+        bot = make_bot()
+        message(bot, 1, "/start", first_name="<b>Max</b> & co")
+        message(bot, 42, "/start admin-secretcode")
+        message(bot, 42, "/subscribers")
+        self.assertIn("&lt;b&gt;Max&lt;/b&gt; &amp; co", bot.tg.sent[-1][1])
 
 
 class Limits(unittest.TestCase):

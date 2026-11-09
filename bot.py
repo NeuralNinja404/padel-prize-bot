@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
+import html
 import json
 import logging
 import threading
@@ -46,6 +48,8 @@ LIMIT_CHAT = "⏳ Сьогодні ви вже кілька разів змін�
 LIMIT_ALL = "⏳ Сьогодні вже забагато нових підписок. Спробуйте завтра."
 LIMIT_MONTH = "⏳ Цього місяця вже забагато змін підписок. Спробуйте наступного місяця."
 BUSY = "⏳ Зараз багато запитів. Спробуйте ще раз за хвилину."
+ADMIN_WELCOME = "✅ Тепер ви адміністратор бота. /subscribers — хто підписаний."
+ADMIN_COMMAND = ("subscribers", "Хто підписаний (лише для адміністратора)")
 
 # Limits that keep the bot inside Vercel's free plan (sized for a few hundred subscribers).
 # In memory (per running instance; stops bursts, resets when Vercel recycles the instance):
@@ -67,6 +71,17 @@ MINUTE, HOUR, DAY = 60.0, 3600.0, 86400.0
 def webhook_secret(token):
     """The secret Telegram sends with every update, so the webhook ignores anyone else. Derived from the token."""
     return hashlib.sha256(f"pado-webhook:{token}".encode()).hexdigest()[:48]
+
+
+def admin_code(secret):
+    """The code in the owner's secret Start link, t.me/<bot>?start=admin-<code>. Derived from CRON_SECRET."""
+    return hashlib.sha256(f"pado-admin:{secret}".encode()).hexdigest()[:24] if secret else ""
+
+
+def profile_of(chat):
+    """What the owner's subscriber list shows: a person's name and @username, or a group's title."""
+    name = chat.get("title") or " ".join(x for x in (chat.get("first_name"), chat.get("last_name")) if x)
+    return {"name": name.strip(), "username": chat.get("username") or ""}
 
 
 class TelegramError(Exception):
@@ -175,10 +190,11 @@ class Pace:
 
 
 class Bot:
-    def __init__(self, telegram, store, cfg, clock=None, limiter=None):
+    def __init__(self, telegram, store, cfg, clock=None, limiter=None, admin_code=""):
         self.tg, self.store, self.cfg = telegram, store, cfg
         self.clock = clock or (lambda: dt.datetime.now(core.KYIV))
         self.limiter = limiter or COMMAND_LIMITER
+        self.admin_code = admin_code  # empty = no one can become admin
 
     def text(self, template):
         city = core.city_name(self.cfg)
@@ -186,7 +202,8 @@ class Bot:
                                limit=core.fmt_uah(self.cfg["min_prize_uah"]))
 
     # ------------------------------------------------------------------ subscribers
-    # stored as the "subscribers" document: {"chats": {"<chat id>": {"since": "<iso time>"}}}
+    # stored as the "subscribers" document:
+    # {"chats": {"<chat id>": {"since": "<iso time>", "name": "Olena K", "username": "olena_k"}}}
 
     def subscribers(self):
         return list(((self.store.get("subscribers", {}) or {}).get("chats") or {}).keys())
@@ -217,7 +234,7 @@ class Bot:
             return "limit_month"
         return None
 
-    def _set_subscribed(self, chat_id, subscribing):
+    def _set_subscribed(self, chat_id, subscribing, profile=None):
         """Subscribe or unsubscribe one chat on its own request.
 
         Returns 'ok', 'already', 'limit_chat', 'limit_all' or 'limit_month'. Checks the cached subscriber list
@@ -242,7 +259,7 @@ class Bot:
                 outcome[:] = [refusal]
                 return doc
             if subscribing:
-                chats[key] = {"since": now.isoformat()}
+                chats[key] = {"since": now.isoformat(), **(profile or {})}
             else:
                 chats.pop(key, None)
             changes = self._changes(doc, now)
@@ -255,8 +272,8 @@ class Bot:
         self.store.update("subscribers", change, default={"chats": {}})
         return outcome[0] if outcome else "ok"
 
-    def subscribe(self, chat_id):
-        return self._set_subscribed(chat_id, True)
+    def subscribe(self, chat_id, profile=None):
+        return self._set_subscribed(chat_id, True, profile)
 
     def unsubscribe(self, chat_id):
         """/stop always works (it only ever reduces messages); it just counts toward the chat's changes."""
@@ -271,6 +288,64 @@ class Bot:
                 chats.pop(key, None)
             return doc
         self.store.update("subscribers", change, default={"chats": {}})  # one write for all of them
+
+    # ------------------------------------------------------------------ the owner's view
+    # admins are stored as the "admins" document: {"chats": {"<chat id>": {"since": "<iso time>"}}}
+
+    def admins(self):
+        return set(((self.store.get("admins", {}, fresh=False) or {}).get("chats") or {}).keys())
+
+    def claim_admin(self, chat_id):
+        key, since = str(chat_id), self.clock().isoformat()
+
+        def change(doc):
+            doc.setdefault("chats", {}).setdefault(key, {"since": since})
+            return doc
+        self.store.update("admins", change, default={"chats": {}})
+        commands = [{"command": c, "description": self.text(d)} for c, d in COMMANDS + [ADMIN_COMMAND]]
+        try:  # /subscribers appears in this chat's command menu only
+            self.tg.call("setMyCommands", commands=commands, scope={"type": "chat", "chat_id": chat_id})
+        except TelegramError as e:
+            log.warning("couldn't set the admin command menu: %s", e)
+
+    def subscriber_report(self):
+        """Who is subscribed (name, @username, since when) and how much of this month's budget is used."""
+        doc = self.store.get("subscribers", {}) or {}  # fresh: the owner wants the current list
+        chats = doc.get("chats") or {}
+        looked_up = {}
+        for key, info in chats.items():
+            if not info.get("name"):  # subscribed before names were saved: ask Telegram once, then remember
+                try:
+                    looked_up[key] = profile_of(self.tg.call("getChat", chat_id=int(key)) or {})
+                except (TelegramError, ValueError):
+                    pass
+        if any(p["name"] for p in looked_up.values()):
+            def remember(d):
+                for key, found in looked_up.items():
+                    info = (d.get("chats") or {}).get(key)
+                    if info is not None and found["name"] and not info.get("name"):
+                        info.update(found)
+                return d
+            try:
+                self.store.update("subscribers", remember, default={"chats": {}})
+            except Exception:
+                log.warning("couldn't save subscriber names", exc_info=True)
+        esc = html.escape
+        lines = []
+        for i, (key, info) in enumerate(sorted(chats.items(), key=lambda kv: kv[1].get("since", "")), 1):
+            info = {**info, **{k: v for k, v in looked_up.get(key, {}).items() if v}}
+            line = f"{i}. {esc(info.get('name') or f'id {key}')}"
+            if info.get("username"):
+                line += f" (@{esc(info['username'])})"
+            if info.get("since"):
+                since = dt.datetime.fromisoformat(info["since"])
+                line += f" — з {since.day} {core.MONTHS[since.month - 1]}"
+            lines.append(line)
+        changes = self._changes(doc, self.clock())
+        head = (f"👥 <b>Підписників: {len(chats)}</b>\n"
+                f"Сьогодні нових: {changes.get('new', 0)} · змін підписок цього місяця: "
+                f"{changes.get('month_total', 0)} з {SUBSCRIPTION_CHANGES_PER_MONTH}")
+        return core.pack([head, "\n".join(lines) or "Поки що ніхто не підписався."])
 
     # ------------------------------------------------------------------ the list
 
@@ -312,9 +387,19 @@ class Bot:
             if verdict == "warn":
                 self.send(chat, [TOO_MANY])
             return
+        payload = text.split()[1] if command == "/start" and len(text.split()) > 1 else ""
+        if payload.startswith("admin-") and self.admin_code and hmac.compare_digest(
+                payload, f"admin-{self.admin_code}"):  # the owner's secret Start link
+            self.claim_admin(chat)
+            self.send(chat, [ADMIN_WELCOME])
+            return
+        if command == "/subscribers":  # for admins only; everyone else just gets the help
+            self.send(chat, self.subscriber_report() if str(chat) in self.admins() else [self.text(HELP)])
+            return
         if command in ("/start", "/stop"):
             try:
-                outcome = self.subscribe(chat) if command == "/start" else self.unsubscribe(chat)
+                outcome = (self.subscribe(chat, profile_of(message.get("chat") or {})) if command == "/start"
+                           else self.unsubscribe(chat))
             except Exception:  # e.g. too many people subscribing at the same moment: ask them to retry
                 log.warning("couldn't update the subscriber list", exc_info=True)
                 self.send(chat, [BUSY])
