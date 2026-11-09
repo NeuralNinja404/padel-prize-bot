@@ -276,6 +276,9 @@ class Storage(unittest.TestCase):
             store.put("doc", {"x": 1})
             self.assertEqual(store.update("doc", lambda d: dict(d, y=2)), {"x": 1, "y": 2})
             self.assertEqual(store.get("doc"), {"x": 1, "y": 2})
+            with mock.patch.object(store, "put") as put:  # an update that changes nothing writes nothing
+                store.update("doc", lambda d: d)
+            put.assert_not_called()
 
     def test_run_check_saves_state_and_spots_news_next_time(self):
         now = dt.datetime(2026, 11, 9, 10, 0, tzinfo=p.KYIV)

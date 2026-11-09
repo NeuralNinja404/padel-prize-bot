@@ -3,7 +3,7 @@
   "framework": "flask",
   "regions": ["fra1"],
   "functions": {
-    "app.py": { "maxDuration": 60 }
+    "app.py": { "maxDuration": 300 }
   },
   "crons": [
     { "path": "/api/daily", "schedule": "0 8 * * *" }

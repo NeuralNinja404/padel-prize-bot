@@ -12,9 +12,12 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import pado_prizes as core
 
@@ -38,6 +41,15 @@ WELCOME = ("👋 Я стежу за турнірами з паделу {city_in}
            "Вартість призів орієнтовна, за цінами магазинів. Перед реєстрацією перевірте сторінку турніру.")
 HELP = "/list — турніри з призами від {limit}\n/start — увімкнути сповіщення\n/stop — вимкнути сповіщення"
 STOPPED = "🔕 Сповіщення вимкнено. Надішліть /start, щоб увімкнути знову."
+TOO_MANY = "⏳ Забагато запитів. Спробуйте трохи згодом."
+
+# Limits that keep the bot inside Vercel's free plan however many people use it.
+PER_CHAT_PER_MINUTE = 5     # commands one chat may send per minute
+PER_CHAT_PER_DAY = 50       # ...and per day
+EVERYONE_PER_MINUTE = 300   # all chats together, as a last safety valve
+SEND_RATE = 20              # alert messages per second, below Telegram's ~30 for bulk sending
+SEND_WORKERS = 8            # alerts sent in parallel
+MINUTE, DAY = 60.0, 86400.0
 
 
 def webhook_secret(token):
@@ -86,10 +98,69 @@ def is_gone(error):
     return error.code == 403 or (error.code == 400 and "chat not found" in error.description.lower())
 
 
+class CommandLimiter:
+    """Caps how often one chat can use the bot, so a single person can't use up the free plan's allowances.
+
+    Kept in memory, not in storage (counting in storage would itself spend the writes we're saving). Vercel
+    reuses a warm instance for back-to-back requests, so bursts are stopped; counters reset when an instance
+    is recycled."""
+
+    def __init__(self, per_minute=PER_CHAT_PER_MINUTE, per_day=PER_CHAT_PER_DAY,
+                 everyone_per_minute=EVERYONE_PER_MINUTE, clock=time.monotonic):
+        self.per_minute, self.per_day, self.everyone_per_minute = per_minute, per_day, everyone_per_minute
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.chats = {}           # chat -> times of its commands within the last day
+        self.everyone = deque()   # times of all commands within the last minute
+        self.warned = {}          # chat -> when it was last told "too many requests"
+
+    def check(self, chat):
+        """'ok' to handle the command, 'warn' to say once that it's too many, 'drop' to ignore it."""
+        now = self.clock()
+        with self.lock:
+            times = self.chats.setdefault(chat, deque())
+            while times and now - times[0] >= DAY:
+                times.popleft()
+            while self.everyone and now - self.everyone[0] >= MINUTE:
+                self.everyone.popleft()
+            last_minute = sum(1 for t in times if now - t < MINUTE)
+            if (last_minute < self.per_minute and len(times) < self.per_day
+                    and len(self.everyone) < self.everyone_per_minute):
+                times.append(now)
+                self.everyone.append(now)
+                return "ok"
+            last_warned = self.warned.get(chat)
+            if last_warned is None or now - last_warned >= MINUTE:
+                self.warned[chat] = now
+                return "warn"
+            return "drop"
+
+
+COMMAND_LIMITER = CommandLimiter()  # shared by every request this instance handles
+
+
+class Pace:
+    """Spaces Telegram sends evenly across threads."""
+
+    def __init__(self, per_second):
+        self.interval = 1.0 / per_second
+        self.lock = threading.Lock()
+        self.next = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            delay = max(0.0, self.next - now)
+            self.next = max(now, self.next) + self.interval
+        if delay:
+            time.sleep(delay)
+
+
 class Bot:
-    def __init__(self, telegram, store, cfg, clock=None):
+    def __init__(self, telegram, store, cfg, clock=None, limiter=None):
         self.tg, self.store, self.cfg = telegram, store, cfg
         self.clock = clock or (lambda: dt.datetime.now(core.KYIV))
+        self.limiter = limiter or COMMAND_LIMITER
 
     def text(self, template):
         city = core.city_name(self.cfg)
@@ -108,15 +179,20 @@ class Bot:
         def change(doc):
             doc.setdefault("chats", {}).setdefault(key, {"since": since})
             return doc
-        self.store.update("subscribers", change, default={"chats": {}})
+        self.store.update("subscribers", change, default={"chats": {}})  # no write if already subscribed
 
     def unsubscribe(self, chat_id):
-        key = str(chat_id)
+        self.unsubscribe_many([chat_id])
+
+    def unsubscribe_many(self, chat_ids):
+        keys = {str(c) for c in chat_ids}
 
         def change(doc):
-            doc.setdefault("chats", {}).pop(key, None)
+            chats = doc.setdefault("chats", {})
+            for key in keys:
+                chats.pop(key, None)
             return doc
-        self.store.update("subscribers", change, default={"chats": {}})
+        self.store.update("subscribers", change, default={"chats": {}})  # one write for all of them
 
     # ------------------------------------------------------------------ the list
 
@@ -124,7 +200,8 @@ class Bot:
         return core.run_check(self.cfg, now or self.clock(), self.store)
 
     def list_messages(self):
-        doc = self.store.get("latest")
+        # The list changes once a day, so a cached copy (up to a minute old) is fine and costs nothing.
+        doc = self.store.get("latest", fresh=False)
         if not doc:  # nothing checked yet; setup normally does the first check
             self.check()
             doc = self.store.get("latest") or {}
@@ -147,9 +224,14 @@ class Bot:
         command = text.split()[0].lower() if text.startswith("/") else ""
         if "@" in command:  # "/list@some_bot" in a group: only answer when it's addressed to us
             command, addressee = command.split("@", 1)
-            username = ((self.store.get("bot", {}) or {}).get("username") or "").lower()
+            username = ((self.store.get("bot", {}, fresh=False) or {}).get("username") or "").lower()
             if username and addressee != username:
                 return
+        verdict = self.limiter.check(chat)
+        if verdict != "ok":
+            if verdict == "warn":
+                self.send(chat, [TOO_MANY])
+            return
         if command == "/start":
             self.subscribe(chat)
             self.send(chat, [self.text(WELCOME)] + self.list_messages())
@@ -161,8 +243,10 @@ class Bot:
         else:
             self.send(chat, [self.text(HELP)])
 
-    def send(self, chat, messages):
+    def send(self, chat, messages, pace=None):
         for text in messages:
+            if pace:
+                pace.wait()
             try:
                 self.tg.send(chat, text)
             except TelegramError as e:
@@ -187,18 +271,30 @@ class Bot:
         if not fresh or not broadcast:
             return summary
         messages = core.render_telegram(entries, self.cfg, only_news=True)
-        for chat in chats:
+        pace = Pace(SEND_RATE)
+
+        def deliver(chat):
             try:
-                self.send(chat, messages)
-                summary["delivered"] += 1
+                self.send(chat, messages, pace)
+                return chat, None
             except TelegramError as e:
-                if is_gone(e):
-                    self.unsubscribe(chat)
-                    summary["removed"] += 1
+                return chat, e
+            except Exception as e:  # one odd failure shouldn't stop the others
+                return chat, TelegramError(0, type(e).__name__)
+
+        gone = []
+        with ThreadPoolExecutor(max_workers=SEND_WORKERS) as pool:
+            for chat, error in pool.map(deliver, chats):
+                if error is None:
+                    summary["delivered"] += 1
+                elif is_gone(error):
+                    gone.append(chat)
                 else:
                     summary["failed"] += 1
-                    log.warning("couldn't message a subscriber: %s", e)
-            time.sleep(0.05)  # well under Telegram's ~30 messages a second
+                    log.warning("couldn't message a subscriber: %s", error)
+        if gone:
+            self.unsubscribe_many(gone)
+        summary["removed"] = len(gone)
         return summary
 
     # ------------------------------------------------------------------ one-off setup

@@ -24,17 +24,22 @@ class MemoryStore:
     """Same get/put/update interface as FileStore and BlobStore; copies values like a real store would."""
 
     def __init__(self):
-        self.docs = {}
+        self.docs, self.reads, self.writes = {}, [], []
 
-    def get(self, key, default=None):
+    def get(self, key, default=None, fresh=True):
+        self.reads.append((key, fresh))
         return json.loads(json.dumps(self.docs[key])) if key in self.docs else default
 
     def put(self, key, value):
+        self.writes.append(key)
         self.docs[key] = json.loads(json.dumps(value))
 
     def update(self, key, change, default=None):
-        value = change(self.get(key, json.loads(json.dumps(default))))
-        self.put(key, value)
+        current = self.get(key, json.loads(json.dumps(default)))
+        before = json.loads(json.dumps(current))
+        value = change(current)
+        if value != before:  # like the real stores: nothing changed, nothing written
+            self.put(key, value)
         return value
 
 
@@ -63,11 +68,14 @@ def entry(i, status="yes", new=False):
             "price": {"url": "https://padel-tennis.com.ua/x"} if status == "yes" else None}
 
 
-def make_bot(store=None, telegram=None):
+def make_bot(store=None, telegram=None, limiter=None):
     store = store or MemoryStore()
     store.put("latest", store.get("latest") or {"updated": NOW.isoformat(), "checked": 113,
                                                 "tournaments": [entry(1), entry(2, "maybe")]})
-    return botlib.Bot(telegram or FakeTelegram(), store, core.DEFAULT_CONFIG, clock=lambda: NOW)
+    store.reads.clear()
+    store.writes.clear()
+    return botlib.Bot(telegram or FakeTelegram(), store, core.DEFAULT_CONFIG, clock=lambda: NOW,
+                      limiter=limiter or botlib.CommandLimiter())  # a fresh limiter per test
 
 
 def message(bot, chat, text):
@@ -287,6 +295,28 @@ class BlobStorage(unittest.TestCase):
         self.assertEqual((req.get_header("X-vercel-blob-access"), req.get_header("X-allow-overwrite")), ("private", "1"))
         self.assertEqual(json.loads(req.data), {"ok": True})
 
+    def test_cached_reads_skip_the_cache_buster(self):
+        seen = []
+
+        def missing(req, timeout=None):
+            seen.append(req.full_url)
+            raise http_error(req.full_url, 404, b"")
+        store = blob_store.BlobStore(self.RW, "AbC123storeid")
+        with mock.patch.object(blob_store.urllib.request, "urlopen", missing):
+            store.get("latest", fresh=False)
+        self.assertEqual(seen, ["https://AbC123storeid.private.blob.vercel-storage.com/pado-bot/latest.json"])
+
+    def test_update_skips_the_write_when_nothing_changed(self):
+        methods = []
+
+        def server(req, timeout=None):
+            methods.append(req.get_method())
+            return FakeResponse(b'{"chats": {"42": {"since": "x"}}}', {"etag": '"v1"'})
+        store = blob_store.BlobStore(self.RW, "AbC123storeid")
+        with mock.patch.object(blob_store.urllib.request, "urlopen", server):
+            store.update("subscribers", lambda d: (d["chats"].setdefault("42", {"since": "y"}), d)[1])
+        self.assertEqual(methods, ["GET"])
+
     def test_update_retries_when_someone_else_wrote_first(self):
         etags = iter(['"v1"', '"v2"'])
         writes = []
@@ -304,6 +334,62 @@ class BlobStorage(unittest.TestCase):
             result = store.update("subscribers", lambda d: {"chats": dict(d["chats"], **{"42": {}})})
         self.assertEqual(writes, ['"v1"', '"v2"'])
         self.assertEqual(result, {"chats": {"42": {}}})
+
+
+class Limits(unittest.TestCase):
+    def test_spamming_a_command_gets_one_warning_then_silence(self):
+        bot = make_bot()
+        for _ in range(8):
+            message(bot, 42, "/list")
+        texts = [text for chat, text in bot.tg.sent]
+        self.assertEqual(len(texts), 6)  # 5 lists, 1 warning, then nothing
+        self.assertEqual(texts[-1], botlib.TOO_MANY)
+        self.assertEqual(bot.store.reads.count(("latest", False)), 5)  # ignored commands read nothing
+
+    def test_limiter_windows(self):
+        clock = [1000.0]
+        limiter = botlib.CommandLimiter(per_minute=2, per_day=3, everyone_per_minute=100, clock=lambda: clock[0])
+        verdicts = [limiter.check(1) for _ in range(4)]
+        self.assertEqual(verdicts, ["ok", "ok", "warn", "drop"])
+        clock[0] += 61  # a minute later: allowed again, until the daily cap
+        self.assertEqual([limiter.check(1), limiter.check(1)], ["ok", "warn"])
+        clock[0] += botlib.DAY
+        self.assertEqual(limiter.check(1), "ok")
+        self.assertEqual(limiter.check(2), "ok")  # other chats have their own counters
+
+    def test_everyone_together_has_a_ceiling(self):
+        limiter = botlib.CommandLimiter(per_minute=5, per_day=50, everyone_per_minute=3, clock=lambda: 5.0)
+        self.assertEqual([limiter.check(c) for c in (1, 2, 3, 4)], ["ok", "ok", "ok", "warn"])
+
+    def test_list_reads_the_cached_copy(self):
+        bot = make_bot()
+        message(bot, 42, "/list")
+        self.assertEqual(bot.store.reads, [("latest", False)])
+
+    def test_repeating_start_writes_nothing(self):
+        bot = make_bot()
+        message(bot, 42, "/start")
+        message(bot, 42, "/start")
+        message(bot, 7, "/stop")  # wasn't subscribed: nothing to write either
+        self.assertEqual(bot.store.writes, ["subscribers"])
+
+    def test_alerts_go_out_in_parallel_to_everyone(self):
+        bot = make_bot()
+        bot.store.put("subscribers", {"chats": {str(i): {} for i in range(40)}})
+        with mock.patch.object(core, "run_check", lambda cfg, now, store: ([entry(10, new=True)], 113)), \
+                mock.patch.object(botlib.time, "sleep"):
+            summary = bot.daily()
+        self.assertEqual((summary["delivered"], len(bot.tg.sent)), (40, 40))
+        self.assertEqual(sorted(int(c) for c, _ in bot.tg.sent), list(range(40)))
+
+    def test_pace_spaces_sends(self):
+        pauses = []
+        with mock.patch.object(botlib.time, "monotonic", lambda: 100.0), \
+                mock.patch.object(botlib.time, "sleep", pauses.append):
+            pace = botlib.Pace(20)
+            for _ in range(3):
+                pace.wait()
+        self.assertEqual([round(p, 2) for p in pauses], [0.05, 0.1])
 
 
 try:

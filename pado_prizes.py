@@ -17,6 +17,7 @@ Settings: config.json.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import html
 import json
@@ -98,16 +99,19 @@ class FileStore:
     def _path(self, key):
         return os.path.join(self.folder, key + ".json")
 
-    def get(self, key, default=None):
+    def get(self, key, default=None, fresh=True):  # files are always fresh; `fresh` matters for BlobStore
         return load_json(self._path(key), default)
 
     def put(self, key, value):
         save_json(self._path(key), value)
 
     def update(self, key, change, default=None):
-        """Read a document, apply change(document) -> new document, write it back, return it."""
-        value = change(self.get(key, default))
-        self.put(key, value)
+        """Read a document, apply change(document) -> new document, write it back if it changed, return it."""
+        current = self.get(key, copy.deepcopy(default))
+        before = copy.deepcopy(current)
+        value = change(current)
+        if value != before:
+            self.put(key, value)
         return value
 
 

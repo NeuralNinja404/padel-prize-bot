@@ -56,9 +56,14 @@ class BlobStore:
     def _pathname(self, key):
         return f"{self.prefix}{key}.json"
 
-    def _read(self, key):
-        """(document or None, etag or None). Reads bypass the cache so they always see the latest write."""
-        url = f"https://{self.store_id}.private.blob.vercel-storage.com/{self._pathname(key)}?cache=0"
+    def _read(self, key, fresh=True):
+        """(document or None, etag or None).
+
+        fresh=True bypasses Vercel's cache, so it sees the latest write; every such read counts toward the
+        plan's read allowance. fresh=False may return a copy up to a minute old, and cache hits aren't counted."""
+        url = f"https://{self.store_id}.private.blob.vercel-storage.com/{self._pathname(key)}"
+        if fresh:
+            url += "?cache=0"
         req = urllib.request.Request(url, headers={"authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -68,8 +73,8 @@ class BlobStore:
                 return None, None
             raise BlobStoreError(f"reading {key} failed: HTTP {e.code}") from None
 
-    def get(self, key, default=None):
-        value, _ = self._read(key)
+    def get(self, key, default=None, fresh=True):
+        value, _ = self._read(key, fresh)
         return default if value is None else value
 
     def put(self, key, value, if_match=None):
@@ -101,10 +106,16 @@ class BlobStore:
             raise BlobStoreError(f"writing {key} failed: HTTP {e.code} {code}".strip()) from None
 
     def update(self, key, change, default=None, attempts=5):
-        """Read-modify-write that never loses a concurrent update: retries when the document changed meanwhile."""
+        """Read-modify-write that never loses a concurrent update: retries when the document changed meanwhile.
+
+        Skips the write when change() leaves the document as it was (writes are the scarcest allowance)."""
         for attempt in range(attempts):
             value, etag = self._read(key)
-            new = change(copy.deepcopy(default) if value is None else value)
+            current = copy.deepcopy(default) if value is None else value
+            before = copy.deepcopy(current)
+            new = change(current)
+            if new == before:
+                return new
             try:
                 self.put(key, new, if_match=etag)
                 return new
