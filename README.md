@@ -54,45 +54,6 @@ python3 pado_prizes.py
 
 The third line runs the offline tests. The last prints the current list and saves it to `out/` (Markdown, HTML, JSON), with its caches in `data/`. It never messages Telegram, and it needs only the Python standard library (3.9+). Flask is needed only for the web app and its tests.
 
-## Deploying your own
-
-You need a bot token from [@BotFather](https://t.me/BotFather), a Vercel account, and Node.js (for `npx vercel`). Run the steps from the project folder:
-
-1. **Log in, create a project and link this folder to it:**
-   ```bash
-   npx vercel login
-   npx vercel project create my-padel-bot
-   npx vercel link --yes --project my-padel-bot
-   ```
-2. **Create private storage and connect it to the project.** This sets `BLOB_READ_WRITE_TOKEN`:
-   ```bash
-   npx vercel blob create-store my-padel-bot-data --access private --region fra1 --yes --environment production
-   ```
-3. **Add the secrets.** The first command asks you to paste the bot token:
-   ```bash
-   npx vercel env add TELEGRAM_BOT_TOKEN --environment production --sensitive
-   python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" > .cron_secret
-   npx vercel env add CRON_SECRET --environment production --sensitive --value "$(cat .cron_secret)" --yes
-   ```
-4. **Deploy:** `npx vercel deploy --prod --yes`
-5. **Run the one-time setup** once the deployment is live. It points Telegram at the webhook, sets the command menu and description, and does the first check:
-   ```bash
-   curl -X POST -H "Authorization: Bearer $(cat .cron_secret)" https://my-padel-bot.vercel.app/api/setup
-   ```
-
-The daily check is the cron in `vercel.json` (`0 8 * * *` UTC, which is 10:00 Kyiv time in winter and 11:00 in summer). On Vercel's free plan, scheduled jobs run once a day, at some point within the chosen hour.
-
-## Operating it
-
-The examples use the live bot's address; replace it with yours.
-
-- **Deploy a change:** run the tests, then `npx vercel deploy --prod --yes`.
-- **After changing the bot's commands or texts** (in `bot.py`), deploy, then run setup again (step 5 above).
-- **After changing how prizes are labelled** (texts in `pado_prizes.py`), refresh quietly once after deploying. Otherwise every relabelled prize looks "changed" and every subscriber gets an alert:
-  `curl -H "Authorization: Bearer $(cat .cron_secret)" "https://padel-prize-bot.vercel.app/api/daily?quiet=1"`
-- **Run the daily check now, with alerts:** `curl -H "Authorization: Bearer $(cat .cron_secret)" https://padel-prize-bot.vercel.app/api/daily`
-- **Read the logs:** `npx vercel logs --since 1h`
-
 ## How it's built
 
 - **`app.py` has three routes:**
@@ -101,9 +62,14 @@ The examples use the live bot's address; replace it with yours.
   - `POST /api/setup`: the one-off setup, also protected by `CRON_SECRET`.
 - **Storage:** a private Vercel Blob store holds the subscribers' chat IDs, the latest list, the previous check's results, and the racket-price and club-name caches, all as `pado-bot/*.json`. Writes use conditional updates, so two people pressing Start at the same moment can't overwrite each other.
 - **Environment variables** (Production): `TELEGRAM_BOT_TOKEN`, `CRON_SECRET`, `BLOB_READ_WRITE_TOKEN`.
+- **Schedule:** the daily check is the cron in `vercel.json` (`0 8 * * *` UTC, which is 10:00 Kyiv time in winter and 11:00 in summer). On Vercel's free plan, scheduled jobs run once a day, at some point within the chosen hour.
 
 ## Caveats
 
 - **PADO's API isn't documented.** It's the one pado.app itself uses, so it can change. If it does, the daily check fails with an error in the logs and nobody gets a wrong list.
 - **Prize text is written by organisers in many styles.** Unusual wording can be missed or misread, which is why the bot tells people to check the tournament page before signing up.
 - **Shop prices are a rough guide** to a prize's value, not a quote.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
