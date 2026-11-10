@@ -199,6 +199,11 @@ class NewAndChanged(unittest.TestCase):
         entries, statuses = p.build_entries(ts, p.DEFAULT_CONFIG, self.NOW, FakePricer({}), {}, previous)
         return {e["id"]: (e["new"], e["changed"]) for e in entries}, statuses
 
+    def test_links_open_the_pado_app_when_installed(self):
+        entries, _ = p.build_entries([self.tournament(1, "A | СЕРТИФІКАТ 15000 ₴")], p.DEFAULT_CONFIG, self.NOW,
+                                     FakePricer({}), {}, {})
+        self.assertEqual(entries[0]["url"], "https://pado.app/d/tournament/1")
+
     def test_first_run_marks_nothing_new(self):
         marks, statuses = self.entries({})
         self.assertEqual(marks, {1: (False, False), 2: (False, False), 3: (False, False)})

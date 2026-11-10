@@ -3,7 +3,6 @@
   "city_name": "Київ",
   "city_in": "у Києві",
   "country": "Ukraine",
-  "site_path": "uk/ukraine/kyiv",
   "min_prize_uah": 5000,
   "days_ahead": 90,
   "include_full": true,

@@ -38,6 +38,9 @@ LOG_DIR = os.path.join(ROOT, "logs")
 
 API = "https://api.pado.app"
 SITE = "https://pado.app"
+# PADO's own app link for a tournament: on a phone with the PADO app installed it opens the app (iOS claims
+# every pado.app/d/* link, and Android verifies pado.app links); anywhere else it redirects to the web page.
+TOURNAMENT_LINK = SITE + "/d/tournament/{id}"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -47,7 +50,6 @@ DEFAULT_CONFIG = {
     "city_name": "Київ",               # how texts name the city
     "city_in": "у Києві",              # "in Kyiv", for sentences
     "country": "Ukraine",
-    "site_path": "uk/ukraine/kyiv",   # prefix of pado.app tournament links
     "min_prize_uah": 5000,
     "days_ahead": 90,
     "include_full": True,              # keep full tournaments (the waitlist may still work)
@@ -587,7 +589,7 @@ def build_entries(tournaments, cfg, now, pricer, clubs, previous):
         end = (t.get("timeTo") or "")[:5]
         entries.append({
             "id": t["id"],
-            "url": f"{SITE}/{cfg['site_path']}/tournaments/t-{t['id']}",
+            "url": TOURNAMENT_LINK.format(id=t["id"]),
             "start": start.isoformat(),
             "when": f"{fmt_day(start)}, {start:%H:%M}" + (f"–{end}" if end else ""),
             "name": display_name(t.get("name") or ""),
