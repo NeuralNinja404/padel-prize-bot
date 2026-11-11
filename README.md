@@ -39,7 +39,7 @@ Once a day, around 10:00 Kyiv time, the bot checks PADO. It sends a message only
 | `blob_store.py` | Small JSON documents in a private Vercel Blob store, standard library only |
 | `app.py` | The Flask app Vercel runs: the Telegram webhook, the daily check, setup |
 | `config.json` | City (as PADO's API spells it, plus `city_name` and `city_in` for texts), threshold (`min_prize_uah`), days ahead, price cache length, `show_maybe` |
-| `vercel.json` | Flask preset, Frankfurt region, 60-second limit, the daily cron |
+| `vercel.json` | Flask preset, Frankfurt region, 300-second limit, the daily cron |
 | `requirements.txt` | Flask, the only dependency |
 | `tests/` | Offline tests built from real tournament texts, plus bot, storage and app tests |
 
@@ -60,7 +60,8 @@ The third line runs the offline tests. The last prints the current list and save
   - `POST /api/telegram`: Telegram's webhook. It accepts only requests carrying the secret Telegram sends, which is derived from the bot token.
   - `GET /api/daily`: the daily check, protected by `CRON_SECRET`. Vercel Cron sends it automatically.
   - `POST /api/setup`: the one-off setup, also protected by `CRON_SECRET`.
-- **Storage:** a private Vercel Blob store holds the subscribers (chat ID, name and @username), the latest list, the previous check's results, and the racket-price and club-name caches, all as `pado-bot/*.json`. Writes use conditional updates, so two people pressing Start at the same moment can't overwrite each other.- **Environment variables** (Production): `TELEGRAM_BOT_TOKEN`, `CRON_SECRET`, `BLOB_READ_WRITE_TOKEN`.
+- **Storage:** a private Vercel Blob store holds the subscribers (chat ID, name and @username), the latest list, the previous check's results, and the racket-price and club-name caches, all as `pado-bot/*.json`. Writes use conditional updates, so two people pressing Start at the same moment can't overwrite each other.
+- **Environment variables** (Production): `TELEGRAM_BOT_TOKEN`, `CRON_SECRET`, `BLOB_READ_WRITE_TOKEN`.
 - **Schedule:** the daily check is the cron in `vercel.json` (`0 8 * * *` UTC, which is 10:00 Kyiv time in winter and 11:00 in summer). On Vercel's free plan, scheduled jobs run once a day, at some point within the chosen hour.
 
 ## Caveats
