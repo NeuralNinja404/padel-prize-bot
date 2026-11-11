@@ -830,7 +830,7 @@ def render_telegram(entries, cfg, only_news=False, updated=None):
         blocks.append(f"{mark}<b>{esc(e['when'])}</b> · {esc(e['club'])}\n"
                       f'<a href="{esc(e["url"])}">{esc(e["name"])}</a>\n'
                       f"🏆 {worth} — {esc(e['prize'])}\n"
-                      f"💳 {esc(fee(e))} · 👥 {esc(spots(e))}{extra}")
+                      f"💳 {esc(fee(e))}{extra}")
     if only_news:
         return pack(blocks)
     if not yes:

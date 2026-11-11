@@ -243,6 +243,12 @@ class TelegramRendering(unittest.TestCase):
         joined = "\n".join(messages)
         self.assertTrue(all(e["url"] in joined for e in entries))
 
+    def test_messages_show_the_fee_but_not_the_spots(self):
+        text = p.render_telegram([dict(entry(1), pairs=True)], p.DEFAULT_CONFIG)[0]
+        self.assertIn("💳 1 300 ₴ · парний", text)
+        self.assertNotIn("11/24", text)
+        self.assertNotIn("👥", text)
+
     def test_names_are_html_escaped(self):
         text = p.render_telegram([entry(1, name="A <b> & B")], p.DEFAULT_CONFIG)[0]
         self.assertIn("A &lt;b&gt; &amp; B", text)
