@@ -249,6 +249,15 @@ class TelegramRendering(unittest.TestCase):
         self.assertNotIn("11/24", text)
         self.assertNotIn("👥", text)
 
+    def test_local_reports_have_no_spots_column(self):
+        now = dt.datetime(2026, 11, 11, 10, 0, tzinfo=p.KYIV)
+        e = dict(entry(1), price={"url": "https://padel-tennis.com.ua/x", "product": "Ракетка Bullpadel Neuron",
+                                  "shop": "padel-tennis.com.ua", "sale": None, "note": "", "in_stock": True})
+        for report in (p.render_markdown([e], p.DEFAULT_CONFIG, now), p.render_html([e], p.DEFAULT_CONFIG, now)):
+            self.assertNotIn("Місця", report)
+            self.assertNotIn("11/24", report)
+            self.assertIn("1 300 ₴", report)
+
     def test_names_are_html_escaped(self):
         text = p.render_telegram([entry(1, name="A <b> & B")], p.DEFAULT_CONFIG)[0]
         self.assertIn("A &lt;b&gt; &amp; B", text)

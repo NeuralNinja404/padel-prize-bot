@@ -617,13 +617,6 @@ def build_entries(tournaments, cfg, now, pricer, clubs, previous):
 
 # --------------------------------------------------------------------------- reports
 
-def spots(e):
-    s = f"{e['players']}/{e['max_players']}"
-    if e["full"]:
-        s += ", місць немає" + (f", у черзі {e['waitlist']}" if e["waitlist"] else "")
-    return s
-
-
 def tags(e):
     return [x for x in ("парний" if e["pairs"] else "", e["who"]) if x]
 
@@ -682,21 +675,20 @@ def render_markdown(entries, cfg, now):
            f"Оновлено {fmt_day(now)}, {now:%H:%M}. {tournaments_count(len(yes))}"
            + (f", {new_count(new)}" if new else "") + ".", ""]
     if yes:
-        out += ["| Коли | Турнір | Клуб | Приз | Вартість | Внесок | Місця |", "|---|---|---|---|---|---|---|"]
+        out += ["| Коли | Турнір | Клуб | Приз | Вартість | Внесок |", "|---|---|---|---|---|---|"]
         for e in yes:
             mark = " 🆕" if e["new"] else (" ✏️" if e["changed"] else "")
             name = f"[{cell(e['name'])}]({e['url']})" + (f" ({', '.join(tags(e))})" if tags(e) else "") + mark
             worth = f"[{e['worth']}]({e['price']['url']})" if e["price"] else e["worth"]
-            out.append(f"| {e['when']} | {name} | {cell(e['club'])} | {cell(e['prize'])} | {worth} | "
-                       f"{fee(e)} | {spots(e)} |")
+            out.append(f"| {e['when']} | {name} | {cell(e['club'])} | {cell(e['prize'])} | {worth} | {fee(e)} |")
     else:
         out.append(f"Зараз немає турнірів із призами від {limit}.")
     if maybe:
         out += ["", f"## Можливо, теж від {limit}", "",
-                "| Коли | Турнір | Клуб | Що відомо | Внесок | Місця |", "|---|---|---|---|---|---|"]
+                "| Коли | Турнір | Клуб | Що відомо | Внесок |", "|---|---|---|---|---|"]
         for e in maybe:
             name = f"[{cell(e['name'])}]({e['url']})" + (f" ({', '.join(tags(e))})" if tags(e) else "")
-            out.append(f"| {e['when']} | {name} | {cell(e['club'])} | {cell(e['prize'])} | {fee(e)} | {spots(e)} |")
+            out.append(f"| {e['when']} | {name} | {cell(e['club'])} | {cell(e['prize'])} | {fee(e)} |")
     out += ["", "Вартість: сертифікати й гроші — як указав організатор; ракетки — за звичайною ціною в "
                 "padel-tennis.com.ua або tennisgo.com.ua («від» — точну версію не вказано, тож це найдешевша "
                 "відповідна)."]
@@ -755,20 +747,19 @@ def render_html(entries, cfg, now):
             f'<tr{" class=new" if e["new"] else ""}><td class="when">{esc(e["when"])}</td><td>{name_cell(e)}</td>'
             f'<td>{esc(e["club"])}</td><td>{esc(e["prize"])}'
             + (f'<span class="note">{esc(price_note(e))}</span>' if e["price"] else "")
-            + f'</td><td class="num">{worth_cell(e)}</td><td class="num">{esc(fee(e))}</td>'
-              f'<td class="num">{esc(spots(e))}</td></tr>' for e in yes)
+            + f'</td><td class="num">{worth_cell(e)}</td><td class="num">{esc(fee(e))}</td></tr>' for e in yes)
         parts.append('<div class="wrap"><table><tr><th>Коли</th><th>Турнір</th><th>Клуб</th><th>Приз</th>'
-                     f'<th>Вартість</th><th>Внесок</th><th>Місця</th></tr>{rows}</table></div>')
+                     f'<th>Вартість</th><th>Внесок</th></tr>{rows}</table></div>')
     else:
         parts.append(f"<p>Зараз немає турнірів із призами від {esc(fmt_uah(cfg['min_prize_uah']))}.</p>")
     if maybe:
         rows = "".join(
             f'<tr><td class="when">{esc(e["when"])}</td><td>{name_cell(e)}</td><td>{esc(e["club"])}</td>'
-            f'<td>{esc(e["prize"])}</td><td class="num">{esc(fee(e))}</td><td class="num">{esc(spots(e))}</td></tr>'
+            f'<td>{esc(e["prize"])}</td><td class="num">{esc(fee(e))}</td></tr>'
             for e in maybe)
         parts.append(f'<h2>Можливо, теж від {esc(fmt_uah(cfg["min_prize_uah"]))}</h2>'
                      '<div class="wrap"><table><tr><th>Коли</th><th>Турнір</th><th>Клуб</th>'
-                     f"<th>Що відомо</th><th>Внесок</th><th>Місця</th></tr>{rows}</table></div>")
+                     f"<th>Що відомо</th><th>Внесок</th></tr>{rows}</table></div>")
     summary = tournaments_count(len(yes)) + (f", {new_count(new)}" if new else "") + "."
     return HTML_PAGE.format(city=esc(city_name(cfg)), limit=esc(fmt_uah(cfg["min_prize_uah"])),
                             updated=f"{fmt_day(now)}, {now:%H:%M}", summary=summary, body="\n".join(parts))
