@@ -62,8 +62,8 @@ class FakeTelegram:
         self.sent.append((str(chat_id), text))
 
 
-def entry(i, status="yes", new=False):
-    return {"id": i, "status": status, "new": new, "changed": False, "when": "Sat 14 Nov 16:00–18:00",
+def entry(i, status="yes", new=False, start="2026-11-14T16:00:00+02:00"):
+    return {"id": i, "status": status, "new": new, "changed": False, "start": start, "when": "Sat 14 Nov 16:00–18:00",
             "club": "P12 Padel Club", "url": f"https://pado.app/uk/ukraine/kyiv/tournaments/t-{i}",
             "name": f"Padel Marathon D/D+ #{i}", "prize": "Bullpadel NEURON 02 CMF 27",
             "worth": "15 400 ₴" if status == "yes" else "", "fee": 1300, "players": 11, "max_players": 24,
@@ -542,6 +542,37 @@ class Limits(unittest.TestCase):
             for _ in range(3):
                 pace.wait()
         self.assertEqual([round(p, 2) for p in pauses], [0.05, 0.1])
+
+
+class FreshList(unittest.TestCase):
+    """/list shows the daily check's list minus the tournaments that have started since."""
+
+    @staticmethod
+    def stored(*entries):
+        store = MemoryStore()
+        store.put("latest", {"updated": NOW.isoformat(), "checked": 113, "tournaments": list(entries)})
+        return store
+
+    def test_list_leaves_out_tournaments_that_have_started(self):
+        started = entry(3, start="2026-11-10T10:00:00+02:00")  # NOW is 10:05 that day
+        bot = make_bot(self.stored(entry(1), started))
+        message(bot, 42, "/list")
+        text = bot.tg.sent[0][1]
+        self.assertIn("#1", text)
+        self.assertNotIn("#3", text)
+        self.assertIn("1 турнір · перевірено", text)
+
+    def test_start_leaves_them_out_too(self):
+        bot = make_bot(self.stored(entry(1), entry(3, start="2026-11-09T16:00:00+02:00")))
+        message(bot, 42, "/start")
+        texts = "\n".join(text for _, text in bot.tg.sent)
+        self.assertIn("#1", texts)
+        self.assertNotIn("#3", texts)
+
+    def test_when_everything_has_started_the_list_says_so(self):
+        bot = make_bot(self.stored(entry(1, start="2026-11-09T16:00:00+02:00")))
+        message(bot, 42, "/list")
+        self.assertIn("Зараз немає турнірів", bot.tg.sent[0][1])
 
 
 try:

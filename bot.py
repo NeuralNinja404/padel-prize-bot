@@ -359,7 +359,12 @@ class Bot:
             self.check()
             doc = self.store.get("latest") or {}
         updated = dt.datetime.fromisoformat(doc["updated"]) if doc.get("updated") else None
-        return core.render_telegram(doc.get("tournaments", []), self.cfg, updated=updated)
+        return core.render_telegram(self.upcoming(doc.get("tournaments", [])), self.cfg, updated=updated)
+
+    def upcoming(self, entries):
+        """The daily check's list without the tournaments that have started since (no request to PADO)."""
+        now = self.clock()
+        return [e for e in entries if not e.get("start") or dt.datetime.fromisoformat(e["start"]) > now]
 
     # ------------------------------------------------------------------ incoming updates
 
